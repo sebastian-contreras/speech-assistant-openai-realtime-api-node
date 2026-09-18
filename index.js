@@ -77,16 +77,23 @@ fastify.get('/', async (request, reply) => {
     reply.send({ message: 'Twilio Media Stream Server is running!' });
 });
 
+const getPublicWsHost = (request) => {
+    const forwardedHost = request.headers['x-forwarded-host'];
+    const host = forwardedHost ? forwardedHost.split(',')[0].trim() : request.headers.host;
+    const forwardedProto = request.headers['x-forwarded-proto'];
+    const protocol = forwardedProto ? forwardedProto.split(',')[0].trim() : 'https';
+    return `${protocol}://${host}`;
+};
+
 // Route for Twilio to handle incoming calls
 // <Say> punctuation to improve text-to-speech translation
 fastify.all('/incoming-call', async (request, reply) => {
+    const publicWsBase = getPublicWsHost(request);
     const twimlResponse = `<?xml version="1.0" encoding="UTF-8"?>
                           <Response>
-                              <Say voice="Google.en-US-Chirp3-HD-Aoede">Please wait while we connect your call to the A. I. voice assistant, powered by Twilio and the Open A I Realtime API</Say>
-                              <Pause length="1"/>
                               <Say voice="Google.en-US-Chirp3-HD-Aoede">O.K. you can start talking!</Say>
                               <Connect>
-                                  <Stream url="wss://${request.headers.host}/media-stream" />
+                                  <Stream url="wss://${publicWsBase.replace(/^https?:\/\//, '')}/media-stream" />
                               </Connect>
                           </Response>`;
 
@@ -262,13 +269,26 @@ fastify.register(async (fastify) => {
                         streamSid = data.start.streamSid;
                         console.log('Incoming stream has started', streamSid);
 
+                        // Twilio expects an explicit stream acknowledgment before audio begins.
+                        connection.send(JSON.stringify({
+                            event: 'connected',
+                            protocol: 'media',
+                            version: '1.0.0'
+                        }));
+
                         // Reset start and media timestamp on a new stream
-                        responseStartTimestampTwilio = null; 
+                        responseStartTimestampTwilio = null;
                         latestMediaTimestamp = 0;
                         break;
                     case 'mark':
                         if (markQueue.length > 0) {
                             markQueue.shift();
+                        }
+                        break;
+                    case 'stop':
+                        console.log('Twilio stream stopped', data.stop);
+                        if (openAiWs.readyState === WebSocket.OPEN) {
+                            openAiWs.close();
                         }
                         break;
                     default:
